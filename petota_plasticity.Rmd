@@ -1,0 +1,413 @@
+---
+title: "Plasticity ANOVAs"
+author: "Husain Agha"
+date: "2023-11-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "~/Documents/Experimental/plasticity_experiment/")
+library(tidyverse)
+library(cowplot)
+library(data.table)
+library(infer)
+library(emmeans)
+conflicted::conflict_prefer_all("dplyr", quiet = T)
+options(dplyr.summarise.inform = FALSE)
+extrafont::loadfonts(device = "all")
+set.seed(2023)
+
+permutation.test <- function(groups, distances, n, original, FUN = median){
+  distribution=list()
+  for(i in 1:n){
+    distribution[[i]]=c(dist(tapply(distances, sample(groups, length(groups), FALSE), FUN)))
+  }
+  names <- combn(levels(groups), 2, simplify = T, function(x) paste0(x, collapse = "-"))
+  result = colMeans(t(t(matrix(unlist(distribution), ncol = length(names), byrow = T, dimnames = list(NULL, names))) > original))
+  return(list(result, names))
+}
+
+bootstrap <- function(distances, n, FUN = median){
+  distribution=c()
+  for(i in 1:n){distribution[i] = FUN(sample(distances, length(distances), TRUE))}
+  result = sd(distribution)
+  return(result)
+}
+
+scaleFUN <- function(x) sprintf("%.1f", x)
+
+```
+
+```{r import data, echo = FALSE}
+accessions_ploidy <- read_csv("ploidy_domestication.csv", show_col_types = F) %>% 
+  select(accession, ploidy, domesticated)
+
+accession_levels <- c("PI275138","PI230503","PI472944","PI310994", # 2x wild
+                      "PI365344","PI225677","PI234011","PI195198", # 2x domesticated
+                      "PI498298","PI498300","PI458342","PI545916", # 4x wild
+                      "PI281111","PI473281","PI243371","PI245320") # 4x domesticated
+
+group_levels <- c("2x_LR", "2x_W", "4x_LR", "4x_W")
+
+year1phenos <- read_csv("Phenos/plasticity_phenos_2022.csv", show_col_types = F) %>% 
+                 left_join(accessions_ploidy, by = join_by(accession)) %>%
+                 mutate(days_to_flower = as.numeric(lubridate::mdy(flowering) - lubridate::mdy("06/08/2022")),
+                        dry_vine_mass = ifelse(two_bags, dry_vine_mass - 90, dry_vine_mass - 45),
+                        treatment = factor(treatment, levels = c("lowN", "medN", "highN")),
+                        plantID = factor(plantID),
+                        accession = factor(accession, levels = accession_levels)) %>% 
+                 unite("group", c(ploidy, domesticated), remove = F)  %>% 
+                 mutate(group = factor(group, levels = group_levels)) %>%
+                 select(group, ploidy, domesticated, plantID, rep, accession, treatment, 
+                        days_to_flower, plant_height, dry_vine_mass)
+
+year2phenos <- read_csv("Phenos/plasticity_phenos_2023.csv", show_col_types = F) %>%
+                 relocate(alive, n_bags, .before = flowering) %>% 
+                 filter(if_any(flowering:tuber_number, ~!is.na(.))) %>% 
+                 group_by(uniqueID) %>%
+                 mutate(accession = paste("PI", PI, sep = ""),
+                        alive = ifelse(is.na(alive), F, alive),
+                        days_to_flower = as.numeric(lubridate::mdy(flowering) - lubridate::mdy("05/19/23")),
+                        dry_vine_mass = dry_vine_mass - (45*n_bags),
+                        n_daughter_plants = as.numeric(n_daughter_plants),
+                        productive_stolons = ifelse(!is.na(flowering) | alive, sum(tuber_number, n_daughter_plants, na.rm = T), NA),
+                        treatment = factor(treatment, levels = c("lowN", "highN"))) %>% 
+                 ungroup() %>%
+                 left_join(accessions_ploidy, by = "accession") %>% 
+                 mutate(accession = factor(accession, levels = accession_levels)) %>%
+                 unite("group", c(ploidy, domesticated), remove = F) %>%
+                 mutate(group = factor(group, levels = group_levels)) %>%
+                 select(group, ploidy, domesticated, individual, accession, treatment, 
+                        days_to_flower, plant_height, dry_vine_mass, productive_stolons)
+```
+
+```{r}
+pheno1.list <- year1phenos %>%
+  pivot_longer(days_to_flower:dry_vine_mass, names_to = "trait") %>%
+  filter(treatment != "highN") %>%
+  mutate(treatment = ifelse(treatment == "lowN", 0, 172),
+         year = "2022") %>%
+  group_by(trait) %>%
+  group_split()
+
+pheno2.list <- year2phenos %>%
+  mutate(treatment = ifelse(treatment == "highN", "medN", "lowN")) %>%
+  pivot_longer(days_to_flower:productive_stolons, names_to = "trait") %>%
+  mutate(treatment = ifelse(treatment == "lowN", 0, 172),
+         year = "2023") %>%
+  group_by(trait) %>%
+  group_split()
+
+pheno.list <- unlist(list(pheno1.list, pheno2.list), recursive = F)
+
+aov.list <- lapply(pheno.list, function(x) 
+  aov(value ~ group %in% treatment, data = x)
+  )
+
+lapply(aov.list, summary)
+
+p.adjust(unlist(lapply(aov.list, function(x) summary(x)[[1]][["Pr(>F)"]][1])), method = "BH")
+
+lapply(pheno.list, function(x) x %>%
+         pivot_wider(names_from = treatment, values_from = value) %>%
+         group_by(group, trait, year) %>%
+         summarise(medN = mean(`172`, na.rm = T), lowN = mean(`0`, na.rm = T)) %>%
+         mutate(diff = abs(medN - lowN))) %>%
+  rbindlist() %>%
+  as_tibble() %>%
+  group_by(year, group, trait) %>%
+  mutate(percent_change = (abs(lowN - medN)/lowN)*100) %>%
+  mutate(percent_change = round(percent_change, digits = 3),
+         lowN = round(lowN), medN = round(medN)) %>%
+  arrange(trait, year, group) %>%
+  select(year, trait, group, lowN, medN, percent_change)
+
+trait.list = c("days_to_flower" = "FT",
+               "plant_height" = "PH",
+               "dry_vine_mass" = "AGB",
+               "productive_stolons" = "PS")
+
+plot.list <- lapply(pheno.list, function(x){ 
+                    x %>%
+                      filter(!is.na(value)) %>%
+                      group_by(group, treatment) %>%
+                      mutate(mean = mean(value, na.rm = T),
+                             treatment = ifelse(treatment == 0, "0 kg/ha", "172 kg/ha")) %>%
+                      ggplot(aes(color = group)) +
+                      stat_summary(fun.data = "mean_se", aes(x = treatment, y = value), size = 0.4) +
+                      geom_path(aes(x = treatment, y = mean, group = group)) + 
+                      scale_x_discrete(expand = c(0.2, 0)) +
+                      scale_color_discrete(name = "Group", 
+                                           labels = c("2x Landrace", "2x Wild", 
+                                                      "4x Landrace", "4x Wild")) + 
+                      labs(x = "", y = "") +
+                      theme_classic(12) + 
+                      theme(plot.title = element_text(hjust = 0.5),
+                            text=element_text(family="Times New Roman"))})
+
+plot.list[[8]] <- ggplot(data = cars) + geom_blank() + theme(panel.background = element_blank())
+
+
+plot.list.ordered <- list(plot.list[[1]], plot.list[[4]], plot.list[[2]], plot.list[[5]],
+                          plot.list[[3]], plot.list[[6]], plot.list[[8]], plot.list[[7]])
+
+plot.list.ordered[[1]] <- plot.list.ordered[[1]] + labs(x = "", y = "Days")
+plot.list.ordered[[3]] <- plot.list.ordered[[3]] + labs(x = "", y = "Grams")
+plot.list.ordered[[5]] <- plot.list.ordered[[5]] + labs(x = "Treatment", y = "Centimeters")
+plot.list.ordered[[8]] <- plot.list.ordered[[8]] + labs(x = "Treatment", y = "Count")
+
+year1 <- ggplot() + 
+  geom_text(aes(x=0, y=0, label = "2022"),
+            angle = 0,
+            size = 5,
+            family = "Times New Roman") +
+  scale_y_continuous(expand = expansion(mult = 0, add = 0)) + 
+  theme_void() + scale_x_continuous(expand = expansion()) + 
+  theme(plot.margin = margin(0, 0, 0, 0),
+        plot.background = element_rect(fill = "white", color = "white"))
+
+year2 <- ggplot() + 
+  geom_text(aes(x=0, y=0, label = "2023"),
+            angle = 0,
+            size = 5,
+            family = "Times New Roman") +
+  scale_y_continuous(expand = expansion(mult = 0, add = 0)) + 
+  theme_void() + scale_x_continuous(expand = expansion()) + 
+  theme(plot.margin = margin(0, 0, 0, 0),
+        plot.background = element_rect(fill = "white", color = "white"))
+
+ft.label <- ggplot() + 
+  geom_text(aes(x=0, y=0, label = "Flowering\nTime"),
+            angle = 90,
+            size = 5,
+            family = "Times New Roman") +
+  theme(plot.margin = margin(0, 0, 0, 0),
+        plot.background = element_rect(fill = "white", color = "white"),
+        line = element_blank(), 
+        text = element_blank(), 
+        title = element_blank(),
+        panel.background = element_blank(),
+        axis.ticks.length = - unit(0.1, "npc"))
+
+agb.label <- ggplot() + 
+  geom_text(aes(x=0, y=0, label = "Aboveground\nBiomass"),
+            angle = 90,
+            size = 5,
+            family = "Times New Roman") +
+  theme(plot.margin = margin(0, 0, 0, 0),
+        plot.background = element_rect(fill = "white", color = "white"),
+        line = element_blank(), 
+        text = element_blank(), 
+        title = element_blank(),
+        panel.background = element_blank(),
+        axis.ticks.length = - unit(0.1, "npc"))
+
+ph.label <- ggplot() + 
+  geom_text(aes(x=0, y=0, label = "Plant\nHeight"),
+            angle = 90,
+            size = 5,
+            family = "Times New Roman") +
+  theme(plot.margin = margin(0, 0, 0, 0),
+        plot.background = element_rect(fill = "white", color = "white"),
+        line = element_blank(), 
+        text = element_blank(), 
+        title = element_blank(),
+        panel.background = element_blank(),
+        axis.ticks.length = - unit(0.1, "npc"))
+
+ps.label <- ggplot() + 
+  geom_text(aes(x=0, y=0, label = "Productive\nStolons"),
+            angle = 90,
+            size = 5,
+            family = "Times New Roman") +
+  theme(plot.margin = margin(0, 0, 0, 0),
+        plot.background = element_rect(fill = "white", color = "white"),
+        line = element_blank(), 
+        text = element_blank(), 
+        title = element_blank(),
+        panel.background = element_blank(),
+        axis.ticks.length = - unit(0.1, "npc"))
+
+plot.list.ordered <- list(plot.list[[8]], year1,          year2,
+                          ft.label,       plot.list[[1]], plot.list[[4]], 
+                          agb.label,      plot.list[[2]], plot.list[[5]],
+                          ph.label,       plot.list[[3]], plot.list[[6]], 
+                          ps.label,       plot.list[[8]], plot.list[[7]])
+
+plot.grid <- ggpubr::ggarrange(plotlist = plot.list.ordered, 
+                               labels = c("", "", "",
+                                          "", "A", "D",
+                                          "", "B", "E",
+                                          "", "C", "F",
+                                          "", "", "G"), 
+                               label.x = c(.5, .5, .5,
+                                           .5, 0, 0,
+                                           .5, 0, 0,
+                                           .5, 0, 0,
+                                           .5, 0, 0),
+                               label.y = c(0.5, 0.5, 0.5,
+                                           0.5, 1, 1,
+                                           0.5, 1, 1,
+                                           0.5, 1, 1,
+                                           0.5, 1, 1),
+                               ncol = 3, nrow = 5,
+                               align = "hv",
+                               common.legend = T,
+                               legend = "bottom",
+                               font.label = list(family = "Times New Roman"),
+                               heights = c(0.13, .3, .3, .3, .3), vjust = 0,
+                               widths = c(1.3, 2.6, 2.6))
+
+ggsave(filename = "/Users/husainagha/Documents/Experimental/plasticity_experiment/pheno_plot_raw1.png", 
+       plot.grid, units = "in", width = 6.5, height = 7.5, bg = "white")
+
+
+```
+
+```{r}
+phenoPercent <- lapply(pheno.list, function(x) x %>%
+         pivot_wider(names_from = treatment, values_from = value) %>%
+         group_by(group, trait, year) %>%
+         summarise(medN = mean(`172`, na.rm = T), lowN = mean(`0`, na.rm = T)) %>%
+         mutate(diff = abs(medN - lowN))) %>% 
+  rbindlist() %>% 
+  as_tibble() %>% 
+  group_by(group, trait, year) %>%
+  group_by(year, group, trait) %>%
+  mutate(percent_change = (abs(lowN - medN)/lowN)*100) %>%
+  select(trait, group, percent_change, year) %>%
+  mutate(percent_change = round(percent_change, digits = 3)) %>%
+  group_by(trait, year) %>%
+  group_split()
+
+```
+
+```{r}
+group_long <- c("2x_W" = "2x Wild", "2x_LR" = "2x Landrace", 
+                "4x_W" = "4x Wild", "4x_LR" = "4x Landrace")
+
+plot.list.percent <- lapply(phenoPercent, function(x){ 
+                    x$group <- group_long[x$group]
+                    x %>%
+                      ggplot(aes(x = group, y = percent_change, fill = group)) +
+                      geom_col() + 
+                      geom_text(aes(label = round(percent_change, 1)), 
+                                vjust = -0.5, family = "Times New Roman") + 
+                      labs(x = "", y = expression(Delta*"z (%)"), fill = "Group") +
+                      theme_classic(12) +
+                      scale_y_continuous(expand = expansion(mult = c(0, .5)), n.breaks = 3) + 
+                      theme(axis.ticks.x = element_blank(),
+                            axis.text.x = element_blank(),
+                            text=element_text(family="Times New Roman"))})
+
+year1 <- ggplot() + 
+  geom_text(aes(x=0, y=0, label = "2022"),
+            angle = 0,
+            size = 5,
+            family = "Times New Roman") +
+  scale_y_continuous(expand = expansion(mult = 0, add = 0)) + 
+  theme_void() + scale_x_continuous(expand = expansion()) + 
+  theme(plot.margin = margin(0, 0, 0, 0),
+        plot.background = element_rect(fill = "white", color = "white"))
+
+year2 <- ggplot() + 
+  geom_text(aes(x=0, y=0, label = "2023"),
+            angle = 0,
+            size = 5,
+            family = "Times New Roman") +
+  scale_y_continuous(expand = expansion(mult = 0, add = 0)) + 
+  theme_void() + scale_x_continuous(expand = expansion()) + 
+  theme(plot.margin = margin(0, 0, 0, 0),
+        plot.background = element_rect(fill = "white", color = "white"))
+
+ft.label <- ggplot() + 
+  geom_text(aes(x=0, y=0, label = "Flowering\nTime"),
+            angle = 90,
+            size = 5,
+            family = "Times New Roman") +
+  theme(plot.margin = margin(0, 0, 0, 0),
+        plot.background = element_rect(fill = "white", color = "white"),
+        line = element_blank(), 
+        text = element_blank(), 
+        title = element_blank(),
+        panel.background = element_blank(),
+        axis.ticks.length = - unit(0.1, "npc"))
+
+agb.label <- ggplot() + 
+  geom_text(aes(x=0, y=0, label = "Aboveground\nBiomass"),
+            angle = 90,
+            size = 5,
+            family = "Times New Roman") +
+  theme(plot.margin = margin(0, 0, 0, 0),
+        plot.background = element_rect(fill = "white", color = "white"),
+        line = element_blank(), 
+        text = element_blank(), 
+        title = element_blank(),
+        panel.background = element_blank(),
+        axis.ticks.length = - unit(0.1, "npc"))
+
+ph.label <- ggplot() + 
+  geom_text(aes(x=0, y=0, label = "Plant\nHeight"),
+            angle = 90,
+            size = 5,
+            family = "Times New Roman") +
+  theme(plot.margin = margin(0, 0, 0, 0),
+        plot.background = element_rect(fill = "white", color = "white"),
+        line = element_blank(), 
+        text = element_blank(), 
+        title = element_blank(),
+        panel.background = element_blank(),
+        axis.ticks.length = - unit(0.1, "npc"))
+
+ps.label <- ggplot() + 
+  geom_text(aes(x=0, y=0, label = "Productive\nStolons"),
+            angle = 90,
+            size = 5,
+            family = "Times New Roman") +
+  theme(plot.margin = margin(0, 0, 0, 0),
+        plot.background = element_rect(fill = "white", color = "white"),
+        line = element_blank(), 
+        text = element_blank(), 
+        title = element_blank(),
+        panel.background = element_blank(),
+        axis.ticks.length = - unit(0.1, "npc"))
+
+
+blank <- ggplot(data = NULL, aes(x = 0, y = 0)) + geom_blank() + theme_void()
+
+plot.list.percent <- lapply(plot.list.percent, function(x) x + theme(legend.position = "none"))
+
+plot.list.ordered <- list(blank,     year1,                  year2,
+                          ft.label,  plot.list.percent[[1]], plot.list.percent[[2]], 
+                          agb.label, plot.list.percent[[3]], plot.list.percent[[4]],
+                          ph.label,  plot.list.percent[[5]], plot.list.percent[[6]], 
+                          ps.label,  blank,                  plot.list.percent[[7]])
+
+percent.plots <- ggpubr::ggarrange(plotlist = plot.list.ordered, 
+                               labels = c("", "", "",
+                                          "", "A", "D",
+                                          "", "B", "E",
+                                          "", "C", "F",
+                                          "", "",  "G"), 
+                               label.x = c(.5, .5, .5,
+                                           .5, 0, 0,
+                                           .5, 0, 0,
+                                           .5, 0, 0,
+                                           .5, 0, 0),
+                               label.y = c(0.5, 0.5, 0.5,
+                                           0.5, 1, 1,
+                                           0.5, 1, 1,
+                                           0.5, 1, 1,
+                                           0.5, 1, 1),
+                               ncol = 3, nrow = 5,
+                               align = "hv",
+                               common.legend = T,
+                               legend = "bottom",
+                               font.label = list(family = "Times New Roman"),
+                               heights = c(0.12, .3, .3, .3, .3), vjust = 0,
+                               widths = c(1.3, 2.6, 2.6))
+
+ggsave("percentPlots.png", plot = percent.plots, width = 6.5, height = 7.5)
+```
+
