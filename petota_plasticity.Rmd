@@ -82,11 +82,11 @@ year2phenos <- read_csv("Phenos/plasticity_phenos_2023.csv", show_col_types = F)
                         days_to_flower, plant_height, dry_vine_mass, productive_stolons)
 ```
 
-```{r}
+```{r main effect anova}
 pheno1.list <- year1phenos %>%
   pivot_longer(days_to_flower:dry_vine_mass, names_to = "trait") %>%
-  filter(treatment != "highN") %>%
-  mutate(treatment = ifelse(treatment == "lowN", 0, 172),
+  filter(treatment != "highN", !is.na(value)) %>%
+  mutate(treatment = ifelse(treatment == "lowN", 0, 1),
          year = "2022") %>%
   group_by(trait) %>%
   group_split()
@@ -94,25 +94,29 @@ pheno1.list <- year1phenos %>%
 pheno2.list <- year2phenos %>%
   mutate(treatment = ifelse(treatment == "highN", "medN", "lowN")) %>%
   pivot_longer(days_to_flower:productive_stolons, names_to = "trait") %>%
-  mutate(treatment = ifelse(treatment == "lowN", 0, 172),
+  filter(!is.na(value), value > 0) %>%
+  mutate(treatment = ifelse(treatment == "lowN", 0, 1),
          year = "2023") %>%
   group_by(trait) %>%
   group_split()
 
 pheno.list <- unlist(list(pheno1.list, pheno2.list), recursive = F)
 
-aov.list <- lapply(pheno.list, function(x) 
-  aov(value ~ group %in% treatment, data = x)
+lm.list <- lapply(pheno.list, function(x) 
+  lm(value ~ (ploidy*domesticated):treatment, data = x)
   )
 
-lapply(aov.list, summary)
+lapply(lm.list, function(x) summary(aov(x)))
 
-p.adjust(unlist(lapply(aov.list, function(x) summary(x)[[1]][["Pr(>F)"]][1])), method = "BH")
+traits = c("FT", "AGB", "PH", "FT", "AGB", "PH", "PS")
+effects = c("ploidy", "domestication", "interaction")
+
+matrix(p.adjust(unlist(lapply(lm.list, function(x) summary(aov(x))[[1]][["Pr(>F)"]][1:3])), method = "BH"), ncol = 3, byrow = T, dimnames = list(traits, effects)) < 0.05
 
 lapply(pheno.list, function(x) x %>%
          pivot_wider(names_from = treatment, values_from = value) %>%
          group_by(group, trait, year) %>%
-         summarise(medN = mean(`172`, na.rm = T), lowN = mean(`0`, na.rm = T)) %>%
+         summarise(medN = mean(`1`, na.rm = T), lowN = mean(`0`, na.rm = T)) %>%
          mutate(diff = abs(medN - lowN))) %>%
   rbindlist() %>%
   as_tibble() %>%
@@ -122,6 +126,23 @@ lapply(pheno.list, function(x) x %>%
          lowN = round(lowN), medN = round(medN)) %>%
   arrange(trait, year, group) %>%
   select(year, trait, group, lowN, medN, percent_change)
+
+# cohens_d <- lapply(pheno.list, function(x) {
+#   x %>% 
+#     group_by(ploidy, domesticated, treatment, trait, year) %>% 
+#     filter(!is.na(value)) %>% 
+#     summarise(sd = sd(value), n = n(), mean = mean(value)) %>% 
+#     pivot_wider(names_from = treatment, values_from = sd:mean) %>% 
+#     mutate(pooled_sd = (sqrt((n_0 - 1)*(sd_0^2) + (n_1 - 1)*(sd_1^2))/sum(n_0, n_1, -2)),
+#            d_cohen = (mean_1 - mean_0)/pooled_sd)}) %>%
+#   bind_rows() %>% 
+#   select(ploidy, domesticated, trait, year, d_cohen) %>%
+#   pivot_wider(names_from = trait, values_from = d_cohen)
+
+
+```
+
+```{r reaction norm plot}
 
 trait.list = c("days_to_flower" = "FT",
                "plant_height" = "PH",
@@ -259,13 +280,972 @@ plot.grid <- ggpubr::ggarrange(plotlist = plot.list.ordered,
                                heights = c(0.13, .3, .3, .3, .3), vjust = 0,
                                widths = c(1.3, 2.6, 2.6))
 
-ggsave(filename = "/Users/husainagha/Documents/Experimental/plasticity_experiment/pheno_plot_raw1.png", 
-       plot.grid, units = "in", width = 6.5, height = 7.5, bg = "white")
+# ggsave(filename = "/Users/husainagha/Documents/Experimental/plasticity_experiment/pheno_plot_raw1.png", 
+#        plot.grid, units = "in", width = 6.5, height = 7.5, bg = "white")
+# 
+# two.traits <- ggpubr::ggarrange(plotlist = list(plot.list[[1]], plot.list[[5]]), common.legend = T, legend = "bottom", ncol = 2, align = "hv")
+# 
+# ggsave(filename = "/Users/husainagha/Documents/Presentations/trait_values.png",
+#        two.traits, units = "in", width = 15, height = 7.5, bg = "white")
+# 
+# 
+# two.traits.percent <- ggpubr::ggarrange(plotlist = list(plot.list.percent[[1]], plot.list.percent[[4]]), common.legend = T, legend = "bottom", ncol = 2, align = "hv")
+# 
+# ggsave(filename = "/Users/husainagha/Documents/Presentations/percent_change.png",
+#        two.traits.percent, units = "in", width = 15, height = 7.5, bg = "white")
 
+```
+
+```{r mean difference analysis}
+pheno.list.ploidy = unlist(lapply(pheno.list, function(x){
+  x %>% group_by(ploidy) %>% group_split()
+}), recursive = F)
+
+pheno.list.domesticated = unlist(lapply(pheno.list, function(x){
+  x %>% group_by(domesticated) %>% group_split()
+}), recursive = F)
+
+diffs.ploidy <- lapply(pheno.list.ploidy, function(x){
+  diffs = x %>%
+    group_by(group, treatment) %>% 
+    summarise(mean = mean(value)) %>%
+    pivot_wider(names_from = treatment, values_from = mean, names_prefix = "mean") %>%
+    rowwise() %>%
+    mutate(diffs = (mean1 - mean0)/(mean1+mean0)) %>%
+    pull(diffs)
+  c(dist(diffs))
+})
+
+diffs.domesticated <- lapply(pheno.list.domesticated, function(x){
+  diffs = x %>%
+    group_by(group, treatment) %>% 
+    summarise(mean = mean(value)) %>%
+    pivot_wider(names_from = treatment, values_from = mean, names_prefix = "mean") %>%
+    rowwise() %>%
+    mutate(diffs = (mean1 - mean0)/(mean1+mean0)) %>%
+    pull(diffs)
+  c(dist(diffs))
+})
+
+trait1 = c(diffs.ploidy[[1]][1],
+           diffs.ploidy[[2]][1],
+           diffs.domesticated[[1]][1],
+           diffs.domesticated[[2]][1])
+trait2 = c(diffs.ploidy[[3]][1],
+           diffs.ploidy[[4]][1],
+           diffs.domesticated[[3]][1],
+           diffs.domesticated[[4]][1])
+trait3 = c(diffs.ploidy[[5]][1],
+           diffs.ploidy[[6]][1],
+           diffs.domesticated[[5]][1],
+           diffs.domesticated[[6]][1])
+trait4 = c(diffs.ploidy[[7]][1],
+           diffs.ploidy[[8]][1],
+           diffs.domesticated[[7]][1],
+           diffs.domesticated[[8]][1])
+trait5 = c(diffs.ploidy[[9]][1],
+           diffs.ploidy[[10]][1],
+           diffs.domesticated[[9]][1],
+           diffs.domesticated[[10]][1])
+trait6 = c(diffs.ploidy[[11]][1],
+           diffs.ploidy[[12]][1],
+           diffs.domesticated[[11]][1],
+           diffs.domesticated[[12]][1])
+trait7 = c(diffs.ploidy[[13]][1],
+           diffs.ploidy[[14]][1],
+           diffs.domesticated[[13]][1],
+           diffs.domesticated[[14]][1])
+
+
+
+onePermDiff = function(tib){
+  diffs = tib %>% group_by(treatment) %>%
+          mutate(resample = sample(group, replace = F)) %>%
+    group_by(resample, treatment) %>% 
+    summarise(mean = mean(value)) %>%
+    pivot_wider(names_from = treatment, values_from = mean, names_prefix = "mean") %>%
+    rowwise() %>%
+    mutate(diffs = (mean1 - mean0)/(mean1+mean0)) %>%
+    pull(diffs)
+  mean(dist(diffs))
+}
+
+permsDiff.domesticated <- lapply(pheno.list.domesticated, function(x) {
+  sort(unlist(replicate(n = 1000, 
+                        expr = onePermDiff(x),
+                        simplify = F)))}
+)
+
+permsDiff.ploidy <- lapply(pheno.list.ploidy, function(x) {
+  sort(unlist(replicate(n = 1000, 
+                        expr = onePermDiff(x),
+                        simplify = F)))}
+)
+
+permTrait1 = NULL
+permTrait2 = NULL
+permTrait3 = NULL
+permTrait4 = NULL
+permTrait5 = NULL
+permTrait6 = NULL
+permTrait7 = NULL
+for(i in 1:1000){
+permTrait1 = c(permTrait1, permsDiff.ploidy[[1]][i],
+                           permsDiff.ploidy[[2]][i],
+                           permsDiff.domesticated[[1]][i],
+                           permsDiff.domesticated[[2]][i])
+permTrait2 = c(permTrait2, permsDiff.ploidy[[3]][i],
+                           permsDiff.ploidy[[4]][i],
+                           permsDiff.domesticated[[3]][i],
+                           permsDiff.domesticated[[4]][i])
+permTrait3 = c(permTrait3, permsDiff.ploidy[[5]][i],
+                           permsDiff.ploidy[[6]][i],
+                           permsDiff.domesticated[[5]][i],
+                           permsDiff.domesticated[[6]][i])
+permTrait4 = c(permTrait4, permsDiff.ploidy[[7]][i],
+                           permsDiff.ploidy[[8]][i],
+                           permsDiff.domesticated[[7]][i],
+                           permsDiff.domesticated[[8]][i])
+permTrait5 = c(permTrait5, permsDiff.ploidy[[9]][i],
+                           permsDiff.ploidy[[10]][i],
+                           permsDiff.domesticated[[9]][i],
+                           permsDiff.domesticated[[10]][i])
+permTrait6 = c(permTrait6, permsDiff.ploidy[[11]][i],
+                           permsDiff.ploidy[[12]][i],
+                           permsDiff.domesticated[[11]][i],
+                           permsDiff.domesticated[[12]][i])
+permTrait7 = c(permTrait7, permsDiff.ploidy[[13]][i],
+                           permsDiff.ploidy[[14]][i],
+                           permsDiff.domesticated[[13]][i],
+                           permsDiff.domesticated[[14]][i])
+}
+
+traitDiff.list <- list(trait1, trait2, trait3, trait4, trait5, trait6, trait7)
+
+traitDiff.tibList <- lapply(traitDiff.list, function(x){
+  tibble(comparison = c("2xLR-4xLR", "2xW-4xW","2xLR-2xW", "4xLR-4xW"), diff = x)
+})
+
+permDiff.list <- list(permTrait1, permTrait2, permTrait3, permTrait4, permTrait5, permTrait6, permTrait7)
+
+permDiff.tibList <- lapply(permDiff.list, function(x){
+  tibble(comparison = rep(c("2xLR-4xLR", "2xW-4xW","2xLR-2xW", "4xLR-4xW"), times = 1000), perm = x)
+})
+
+onlyFourDivideAll <- list()
+for(i in 1:7){
+onlyFourDivideAll[[i]] <- left_join(permDiff.tibList[[i]], traitDiff.tibList[[i]]) %>% 
+  mutate(less_than = diff<perm) %>% 
+  group_by(comparison) %>% 
+  summarise(pval = mean(less_than),
+            significant = pval<0.05)
+}
+```
+
+```{r mean difference analysis}
+diffs.ploidy <- lapply(pheno.list.ploidy, function(x){
+  diffs = x %>%
+    group_by(group, treatment) %>% 
+    summarise(mean = mean(value)) %>%
+    pivot_wider(names_from = treatment, values_from = mean, names_prefix = "mean") %>%
+    rowwise() %>%
+    mutate(diffs = (mean1 - mean0)) %>%
+    pull(diffs)
+  c(dist(diffs))
+})
+
+diffs.domesticated <- lapply(pheno.list.domesticated, function(x){
+  diffs = x %>%
+    group_by(group, treatment) %>% 
+    summarise(mean = mean(value)) %>%
+    pivot_wider(names_from = treatment, values_from = mean, names_prefix = "mean") %>%
+    rowwise() %>%
+    mutate(diffs = (mean1 - mean0)) %>%
+    pull(diffs)
+  c(dist(diffs))
+})
+
+trait1 = c(diffs.ploidy[[1]][1],
+           diffs.ploidy[[2]][1],
+           diffs.domesticated[[1]][1],
+           diffs.domesticated[[2]][1])
+trait2 = c(diffs.ploidy[[3]][1],
+           diffs.ploidy[[4]][1],
+           diffs.domesticated[[3]][1],
+           diffs.domesticated[[4]][1])
+trait3 = c(diffs.ploidy[[5]][1],
+           diffs.ploidy[[6]][1],
+           diffs.domesticated[[5]][1],
+           diffs.domesticated[[6]][1])
+trait4 = c(diffs.ploidy[[7]][1],
+           diffs.ploidy[[8]][1],
+           diffs.domesticated[[7]][1],
+           diffs.domesticated[[8]][1])
+trait5 = c(diffs.ploidy[[9]][1],
+           diffs.ploidy[[10]][1],
+           diffs.domesticated[[9]][1],
+           diffs.domesticated[[10]][1])
+trait6 = c(diffs.ploidy[[11]][1],
+           diffs.ploidy[[12]][1],
+           diffs.domesticated[[11]][1],
+           diffs.domesticated[[12]][1])
+trait7 = c(diffs.ploidy[[13]][1],
+           diffs.ploidy[[14]][1],
+           diffs.domesticated[[13]][1],
+           diffs.domesticated[[14]][1])
+
+
+
+onePermDiff = function(tib){
+  diffs = tib %>% group_by(treatment) %>%
+          mutate(resample = sample(group, replace = F)) %>%
+    group_by(resample, treatment) %>% 
+    summarise(mean = mean(value)) %>%
+    pivot_wider(names_from = treatment, values_from = mean, names_prefix = "mean") %>%
+    rowwise() %>%
+    mutate(diffs = (mean1 - mean0)) %>%
+    pull(diffs)
+  mean(dist(diffs))
+}
+
+permsDiff.domesticated <- lapply(pheno.list.domesticated, function(x) {
+  sort(unlist(replicate(n = 1000, 
+                        expr = onePermDiff(x),
+                        simplify = F)))}
+)
+
+permsDiff.ploidy <- lapply(pheno.list.ploidy, function(x) {
+  sort(unlist(replicate(n = 1000, 
+                        expr = onePermDiff(x),
+                        simplify = F)))}
+)
+
+permTrait1 = NULL
+permTrait2 = NULL
+permTrait3 = NULL
+permTrait4 = NULL
+permTrait5 = NULL
+permTrait6 = NULL
+permTrait7 = NULL
+for(i in 1:1000){
+permTrait1 = c(permTrait1, permsDiff.ploidy[[1]][i],
+                           permsDiff.ploidy[[2]][i],
+                           permsDiff.domesticated[[1]][i],
+                           permsDiff.domesticated[[2]][i])
+permTrait2 = c(permTrait2, permsDiff.ploidy[[3]][i],
+                           permsDiff.ploidy[[4]][i],
+                           permsDiff.domesticated[[3]][i],
+                           permsDiff.domesticated[[4]][i])
+permTrait3 = c(permTrait3, permsDiff.ploidy[[5]][i],
+                           permsDiff.ploidy[[6]][i],
+                           permsDiff.domesticated[[5]][i],
+                           permsDiff.domesticated[[6]][i])
+permTrait4 = c(permTrait4, permsDiff.ploidy[[7]][i],
+                           permsDiff.ploidy[[8]][i],
+                           permsDiff.domesticated[[7]][i],
+                           permsDiff.domesticated[[8]][i])
+permTrait5 = c(permTrait5, permsDiff.ploidy[[9]][i],
+                           permsDiff.ploidy[[10]][i],
+                           permsDiff.domesticated[[9]][i],
+                           permsDiff.domesticated[[10]][i])
+permTrait6 = c(permTrait6, permsDiff.ploidy[[11]][i],
+                           permsDiff.ploidy[[12]][i],
+                           permsDiff.domesticated[[11]][i],
+                           permsDiff.domesticated[[12]][i])
+permTrait7 = c(permTrait7, permsDiff.ploidy[[13]][i],
+                           permsDiff.ploidy[[14]][i],
+                           permsDiff.domesticated[[13]][i],
+                           permsDiff.domesticated[[14]][i])
+}
+
+traitDiff.list <- list(trait1, trait2, trait3, trait4, trait5, trait6, trait7)
+
+traitDiff.tibList <- lapply(traitDiff.list, function(x){
+  tibble(comparison = c("2xLR-4xLR", "2xW-4xW","2xLR-2xW", "4xLR-4xW"), diff = x)
+})
+
+permDiff.list <- list(permTrait1, permTrait2, permTrait3, permTrait4, permTrait5, permTrait6, permTrait7)
+
+permDiff.tibList <- lapply(permDiff.list, function(x){
+  tibble(comparison = rep(c("2xLR-4xLR", "2xW-4xW","2xLR-2xW", "4xLR-4xW"), times = 1000), perm = x)
+})
+
+onlyFourNoDivide <- list()
+for(i in 1:7){
+onlyFourNoDivide[[i]] <- left_join(permDiff.tibList[[i]], traitDiff.tibList[[i]]) %>% 
+  mutate(less_than = diff<perm) %>% 
+  group_by(comparison) %>% 
+  summarise(pval = mean(less_than),
+            significant = pval<0.05)
+  }
+```
+
+```{r mean difference analysis}
+diffs.ploidy <- lapply(pheno.list.ploidy, function(x){
+  diffs = x %>%
+    group_by(group, treatment) %>% 
+    summarise(mean = mean(value)) %>%
+    pivot_wider(names_from = treatment, values_from = mean, names_prefix = "mean") %>%
+    rowwise() %>%
+    mutate(diffs = (mean1 - mean0)/mean1) %>%
+    pull(diffs)
+  c(dist(diffs))
+})
+
+diffs.domesticated <- lapply(pheno.list.domesticated, function(x){
+  diffs = x %>%
+    group_by(group, treatment) %>% 
+    summarise(mean = mean(value)) %>%
+    pivot_wider(names_from = treatment, values_from = mean, names_prefix = "mean") %>%
+    rowwise() %>%
+    mutate(diffs = (mean1 - mean0)/mean1) %>%
+    pull(diffs)
+  c(dist(diffs))
+})
+
+trait1 = c(diffs.ploidy[[1]][1],
+           diffs.ploidy[[2]][1],
+           diffs.domesticated[[1]][1],
+           diffs.domesticated[[2]][1])
+trait2 = c(diffs.ploidy[[3]][1],
+           diffs.ploidy[[4]][1],
+           diffs.domesticated[[3]][1],
+           diffs.domesticated[[4]][1])
+trait3 = c(diffs.ploidy[[5]][1],
+           diffs.ploidy[[6]][1],
+           diffs.domesticated[[5]][1],
+           diffs.domesticated[[6]][1])
+trait4 = c(diffs.ploidy[[7]][1],
+           diffs.ploidy[[8]][1],
+           diffs.domesticated[[7]][1],
+           diffs.domesticated[[8]][1])
+trait5 = c(diffs.ploidy[[9]][1],
+           diffs.ploidy[[10]][1],
+           diffs.domesticated[[9]][1],
+           diffs.domesticated[[10]][1])
+trait6 = c(diffs.ploidy[[11]][1],
+           diffs.ploidy[[12]][1],
+           diffs.domesticated[[11]][1],
+           diffs.domesticated[[12]][1])
+trait7 = c(diffs.ploidy[[13]][1],
+           diffs.ploidy[[14]][1],
+           diffs.domesticated[[13]][1],
+           diffs.domesticated[[14]][1])
+
+
+
+onePermDiff = function(tib){
+  diffs = tib %>% group_by(treatment) %>%
+          mutate(resample = sample(group, replace = F)) %>%
+    group_by(resample, treatment) %>% 
+    summarise(mean = mean(value)) %>%
+    pivot_wider(names_from = treatment, values_from = mean, names_prefix = "mean") %>%
+    rowwise() %>%
+    mutate(diffs = (mean1 - mean0)/mean1) %>%
+    pull(diffs)
+  mean(dist(diffs))
+}
+
+permsDiff.domesticated <- lapply(pheno.list.domesticated, function(x) {
+  sort(unlist(replicate(n = 1000, 
+                        expr = onePermDiff(x),
+                        simplify = F)))}
+)
+
+permsDiff.ploidy <- lapply(pheno.list.ploidy, function(x) {
+  sort(unlist(replicate(n = 1000, 
+                        expr = onePermDiff(x),
+                        simplify = F)))}
+)
+
+permTrait1 = NULL
+permTrait2 = NULL
+permTrait3 = NULL
+permTrait4 = NULL
+permTrait5 = NULL
+permTrait6 = NULL
+permTrait7 = NULL
+for(i in 1:1000){
+permTrait1 = c(permTrait1, permsDiff.ploidy[[1]][i],
+                           permsDiff.ploidy[[2]][i],
+                           permsDiff.domesticated[[1]][i],
+                           permsDiff.domesticated[[2]][i])
+permTrait2 = c(permTrait2, permsDiff.ploidy[[3]][i],
+                           permsDiff.ploidy[[4]][i],
+                           permsDiff.domesticated[[3]][i],
+                           permsDiff.domesticated[[4]][i])
+permTrait3 = c(permTrait3, permsDiff.ploidy[[5]][i],
+                           permsDiff.ploidy[[6]][i],
+                           permsDiff.domesticated[[5]][i],
+                           permsDiff.domesticated[[6]][i])
+permTrait4 = c(permTrait4, permsDiff.ploidy[[7]][i],
+                           permsDiff.ploidy[[8]][i],
+                           permsDiff.domesticated[[7]][i],
+                           permsDiff.domesticated[[8]][i])
+permTrait5 = c(permTrait5, permsDiff.ploidy[[9]][i],
+                           permsDiff.ploidy[[10]][i],
+                           permsDiff.domesticated[[9]][i],
+                           permsDiff.domesticated[[10]][i])
+permTrait6 = c(permTrait6, permsDiff.ploidy[[11]][i],
+                           permsDiff.ploidy[[12]][i],
+                           permsDiff.domesticated[[11]][i],
+                           permsDiff.domesticated[[12]][i])
+permTrait7 = c(permTrait7, permsDiff.ploidy[[13]][i],
+                           permsDiff.ploidy[[14]][i],
+                           permsDiff.domesticated[[13]][i],
+                           permsDiff.domesticated[[14]][i])
+}
+
+traitDiff.list <- list(trait1, trait2, trait3, trait4, trait5, trait6, trait7)
+
+traitDiff.tibList <- lapply(traitDiff.list, function(x){
+  tibble(comparison = c("2xLR-4xLR", "2xW-4xW","2xLR-2xW", "4xLR-4xW"), diff = x)
+})
+
+permDiff.list <- list(permTrait1, permTrait2, permTrait3, permTrait4, permTrait5, permTrait6, permTrait7)
+
+permDiff.tibList <- lapply(permDiff.list, function(x){
+  tibble(comparison = rep(c("2xLR-4xLR", "2xW-4xW","2xLR-2xW", "4xLR-4xW"), times = 1000), perm = x)
+})
+
+onlyFourDivideOne <- list()
+for(i in 1:7){
+onlyFourDivideOne[[i]] <- left_join(permDiff.tibList[[i]], traitDiff.tibList[[i]]) %>% 
+  mutate(less_than = diff<perm) %>% 
+  group_by(comparison) %>% 
+  summarise(pval = mean(less_than),
+            significant = pval<0.05)
+  }
+```
+
+```{r mean difference analysis}
+
+diffs <- lapply(pheno.list, function(x){
+  diffs = x %>%
+    group_by(group, treatment) %>% 
+    summarise(mean = mean(value)) %>%
+    pivot_wider(names_from = treatment, values_from = mean, names_prefix = "mean") %>%
+    rowwise() %>%
+    mutate(diffs = (mean1 - mean0)) %>%
+    pull(diffs)
+  c(dist(diffs))
+})
+
+onePermDiff = function(tib){
+  diffs = tib %>% group_by(treatment) %>%
+          mutate(resample = sample(group, replace = F)) %>%
+    group_by(resample, treatment) %>% 
+    summarise(mean = mean(value)) %>%
+    pivot_wider(names_from = treatment, values_from = mean, names_prefix = "mean") %>%
+    rowwise() %>%
+    mutate(diffs = (mean1 - mean0)) %>%
+    pull(diffs)
+  mean(dist(diffs))
+}
+
+permsDiff <- lapply(pheno.list, function(x) {
+  sort(unlist(replicate(n = 1000, 
+                        expr = onePermDiff(x),
+                        simplify = F)))})
+
+pvalsLM = list()
+for(i in 1:7){
+  pvalsLM[[i]] = colMeans(matrix(diffs[[i]] < sort(rep(permsDiff[[i]], times = 6)), 
+                                 ncol = 6, byrow = T))
+  names(pvalsLM[[i]]) <- c("2xLR-2xW", "2xLR-4xLR", "2xLR-4xW", "2xW-4xLR", "2xW-4xW", "4xLR-4xW")
+}
+
+compact.letters = lapply(pvalsLM, function(x) multcompView::multcompLetters(x)$Letters)
+
+diffTogetherNoDivide.tibble = tibble(group = rep(groups, times = 7), 
+                     diff = unlist(mean.diff), 
+                     letter = unlist(compact.letters), 
+                     trait = c(rep("FT", times = 4),rep("AGB", times = 4),rep("PH", times = 4),
+                               rep("FT", times = 4),rep("AGB", times = 4),rep("PH", times = 4),
+                               rep("PS", times = 4)),
+                     year = c(rep(2022, times = 12), rep(2023, times = 16))) %>% 
+  group_by(trait, year) %>% group_split()
+
+lapply(diffTogetherNoDivide.tibble, function(x) {x %>%
+  ggplot(aes(x = group, y = diff)) + geom_point() + geom_text(aes(label = letter, y = diff+max(diff)*0.1)) + 
+    labs(title = paste(unique(x$trait), unique(x$year), sep = " ")) + theme_classic()})
+
+allMeans = lapply(pheno.list, function(x){
+  x %>% 
+    group_by(year, trait, group) %>%
+    summarise(mean = mean(value))
+    }
+  ) %>% 
+  rbindlist() %>%
+  mutate(trait = ifelse(trait == "days_to_flower", "FT",
+                        ifelse(trait == "dry_vine_mass", "AGB",
+                               ifelse(trait == "plant_height", "PH", "PS"))),
+         year = as.double(year)) %>%
+  arrange(year, trait, group)
+
+allDiffs = rbindlist(diffTogetherNoDivide.tibble) %>% select(year, trait, group, diff) %>%
+  arrange(year, trait, group)
+
+cor(allDiffs$diff, allMeans$mean)
+
+```
+
+```{r slope plots}
+slopePlots <- lapply(tibble.coef, function(x) {
+  ggplot(x, aes(x = group, y = slope)) + 
+    geom_point(aes(color = group)) + 
+    geom_errorbar(aes(ymin = slope - se, ymax = slope + se, color = group)) + 
+    geom_text(aes(label = letter, y = slope + (se*1.8))) + 
+    theme_classic() + scale_color_discrete(labels = c("2x Landrace", "2x Wild", 
+                                                      "4x Landrace", "4x Wild")) +
+    scale_x_discrete(labels = element_blank()) + 
+    labs(x = element_blank(), y = "Slope") + 
+    theme(axis.ticks = element_blank()) + guides(color = guide_legend(title = "Group"))
+  }
+)
+
+year1 <- ggplot() + 
+  geom_text(aes(x=0, y=0, label = "2022"),
+            angle = 0,
+            size = 5,
+            family = "Times New Roman") +
+  scale_y_continuous(expand = expansion(mult = 0, add = 0)) + 
+  theme_void() + scale_x_continuous(expand = expansion()) + 
+  theme(plot.margin = margin(0, 0, 0, 0),
+        plot.background = element_rect(fill = "white", color = "white"))
+
+year2 <- ggplot() + 
+  geom_text(aes(x=0, y=0, label = "2023"),
+            angle = 0,
+            size = 5,
+            family = "Times New Roman") +
+  scale_y_continuous(expand = expansion(mult = 0, add = 0)) + 
+  theme_void() + scale_x_continuous(expand = expansion()) + 
+  theme(plot.margin = margin(0, 0, 0, 0),
+        plot.background = element_rect(fill = "white", color = "white"))
+
+ft.label <- ggplot() + 
+  geom_text(aes(x=0, y=0, label = "Flowering\nTime"),
+            angle = 90,
+            size = 5,
+            family = "Times New Roman") +
+  theme(plot.margin = margin(0, 0, 0, 0),
+        plot.background = element_rect(fill = "white", color = "white"),
+        line = element_blank(), 
+        text = element_blank(), 
+        title = element_blank(),
+        panel.background = element_blank(),
+        axis.ticks.length = - unit(0.1, "npc"))
+
+agb.label <- ggplot() + 
+  geom_text(aes(x=0, y=0, label = "Aboveground\nBiomass"),
+            angle = 90,
+            size = 5,
+            family = "Times New Roman") +
+  theme(plot.margin = margin(0, 0, 0, 0),
+        plot.background = element_rect(fill = "white", color = "white"),
+        line = element_blank(), 
+        text = element_blank(), 
+        title = element_blank(),
+        panel.background = element_blank(),
+        axis.ticks.length = - unit(0.1, "npc"))
+
+ph.label <- ggplot() + 
+  geom_text(aes(x=0, y=0, label = "Plant\nHeight"),
+            angle = 90,
+            size = 5,
+            family = "Times New Roman") +
+  theme(plot.margin = margin(0, 0, 0, 0),
+        plot.background = element_rect(fill = "white", color = "white"),
+        line = element_blank(), 
+        text = element_blank(), 
+        title = element_blank(),
+        panel.background = element_blank(),
+        axis.ticks.length = - unit(0.1, "npc"))
+
+ps.label <- ggplot() + 
+  geom_text(aes(x=0, y=0, label = "Productive\nStolons"),
+            angle = 90,
+            size = 5,
+            family = "Times New Roman") +
+  theme(plot.margin = margin(0, 0, 0, 0),
+        plot.background = element_rect(fill = "white", color = "white"),
+        line = element_blank(), 
+        text = element_blank(), 
+        title = element_blank(),
+        panel.background = element_blank(),
+        axis.ticks.length = - unit(0.1, "npc"))
+
+
+blank <- ggplot(data = NULL, aes(x = 0, y = 0)) + geom_blank() + theme_void()
+
+plot.list.percent <- lapply(slopePlots, function(x) x + theme(legend.position = "none"))
+
+plot.list.ordered <- list(blank,     year1,                  year2,
+                          ft.label,  slopePlots[[1]], slopePlots[[2]], 
+                          agb.label, slopePlots[[3]], slopePlots[[4]],
+                          ph.label,  slopePlots[[5]], slopePlots[[6]], 
+                          ps.label,  blank,           slopePlots[[7]])
+
+slopePlotAll <- ggpubr::ggarrange(plotlist = plot.list.ordered, 
+                               labels = c("", "", "",
+                                          "", "A", "D",
+                                          "", "B", "E",
+                                          "", "C", "F",
+                                          "", "",  "G"), 
+                               label.x = c(.5, .5, .5,
+                                           .5, 0, 0,
+                                           .5, 0, 0,
+                                           .5, 0, 0,
+                                           .5, 0, 0),
+                               label.y = c(0.5, 0.5, 0.5,
+                                           0.5, 1, 1,
+                                           0.5, 1, 1,
+                                           0.5, 1, 1,
+                                           0.5, 1, 1),
+                               ncol = 3, nrow = 5,
+                               align = "hv",
+                               common.legend = T,
+                               legend = "bottom",
+                               font.label = list(family = "Times New Roman"),
+                               heights = c(0.12, .3, .3, .3, .3), vjust = 0,
+                               widths = c(1.3, 2.6, 2.6))
+
+ggsave("slopePlots.png", plot = slopePlotAll, width = 6.5, height = 7.5)
+
+```
+
+```{r LM outliers removed, eval=FALSE}
+
+phenoNoOuts <- lapply(pheno.list, function(x){
+  x %>%
+    group_by(group, treatment) %>%
+    mutate(q1 = quantile(value, probs = 0.25),
+           q2 = quantile(value, probs = 0.75),
+           iqr = IQR(value),
+           up = q2+(2.5*iqr),
+           down = q1-(2.5*iqr)) %>%
+    filter(value > down, value < up) %>%
+    select(group, treatment, trait, year, value)})
+
+onePermLM = function(value, treatment, group){
+  resample = sample(group, replace = F)
+  mod = lm(value ~ resample %in% treatment)
+  coefs = coef(mod)[-1]
+  max(dist(coefs))
+}
+
+lm.listNoOuts <- lapply(phenoNoOuts, function(x)
+  lm(value ~ group %in% treatment, data = x)
+  )
+
+permsLMNoOuts <- lapply(phenoNoOuts, function(x) {
+  sort(unlist(replicate(n = 1000,
+                        expr = onePermLM(value = x$value,
+                                       treatment = x$treatment,
+                                       group = x$group),
+                        simplify = F)))}
+)
+
+pvalsLMNoOuts = list()
+for(i in 1:7){
+  pvalsLMNoOuts[[i]] = colMeans(matrix(rep(c(dist(coef(lm.listNoOuts[[i]])[-1])), times = 1000) < sort(rep(permsLMNoOuts[[i]], times = 6)),
+                                 ncol = 6, byrow = T))
+  names(pvalsLMNoOuts[[i]]) <- c("2xLR-2xW", "2xLR-4xLR", "2xLR-4xW", "2xW-4xLR", "2xW-4xW", "4xLR-4xW")
+}
+
+compact.lettersNoOuts = lapply(pvalsLMNoOuts, function(x) multcompView::multcompLetters(x)$Letters)
+
+tibble.coefNoOuts <- list()
+for(i in 1:7){
+  tibble.coefNoOuts[[i]] = tibble(slope = coef(lm.listNoOuts[[i]])[-1],
+                            letter = compact.lettersNoOuts[[i]],
+                            se = sqrt(diag(vcov(lm.listNoOuts[[i]])))[-1],
+                            group = names(lm.listNoOuts[[i]]$coefficients)[-1])
+}
+
+lapply(tibble.coefNoOuts, function(x) {
+  ggplot(x, aes(x = group, y = slope)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = slope - se, ymax = slope + se)) +
+    geom_text(aes(label = letter, y = slope + (se*1.6))) +
+    theme_classic() + scale_x_discrete(labels = c("2x Landrace", "2x Wild",
+                                                  "4x Landrace", "4x Wild"))
+  }
+)
+
+tibble.coef
+```
+
+```{r standardized, eval=FALSE}
+lms.standard <- lapply(pheno.list, function(x){
+  lm = lm(standard ~ group %in% treatment, data = x)
+  return(lm)
+  })
+
+lapply(lms.standard, function(x) {
+  summary(aov(x))
+  summary(x)})
+
+
+onePermLM = function(value, treatment, group){
+  resample = sample(group, replace = F)
+  mod = lm(value ~ resample %in% treatment)
+  coefs = coef(mod)[-1]
+  max(dist(coefs))
+}
+
+permsLM <- lapply(pheno.list, function(x) {
+  sort(unlist(replicate(n = 1000, 
+                        expr = onePermLM(value = x$standard, 
+                                       treatment = x$treatment, 
+                                       group = x$group),
+                        simplify = F)))}
+)
+
+pvalsLM = list()
+for(i in 1:7){
+  pvalsLM[[i]] = colMeans(matrix(rep(c(dist(coef(lms.standard[[i]])[-1])), times = 1000) < sort(rep(permsLM[[i]], times = 6)), 
+                                 ncol = 6, byrow = T))
+  names(pvalsLM[[i]]) <- c("2xLR-2xW", "2xLR-4xLR", "2xLR-4xW", "2xW-4xLR", "2xW-4xW", "4xLR-4xW")
+}
+
+compact.letters = lapply(pvalsLM, function(x) multcompView::multcompLetters(x)$Letters)
+
+tibble.coef <- list()
+for(i in 1:7){
+  tibble.coef[[i]] = tibble(slope = coef(lms.standard[[i]])[-1],
+                            letter = compact.letters[[i]],
+                            se = sqrt(diag(vcov(lms.standard[[i]])))[-1],
+                            group = names(lms.standard[[i]]$coefficients)[-1])
+}
+
+lapply(tibble.coef, function(x) {
+  ggplot(x, aes(x = group, y = slope)) + 
+    geom_point() + 
+    geom_errorbar(aes(ymin = slope - se, ymax = slope + se)) + 
+    geom_text(aes(label = letter, y = slope + (se*1.6))) + 
+    theme_classic()
+  }
+)
+
+lapply(lms.standard, function(x) summary(aov(x)))
+
+plot.list <- lapply(pheno.list, function(x){
+                    x %>%
+                      filter(!is.na(standard)) %>%
+                      group_by(group, treatment) %>%
+                      mutate(mean = mean(standard, na.rm = T),
+                             treatment = ifelse(treatment == 0, "0 kg/ha", "172 kg/ha")) %>%
+                      ggplot(aes(color = group)) +
+                      stat_summary(fun.data = "mean_se", aes(x = treatment, y = standard), size = 0.4) +
+                      geom_path(aes(x = treatment, y = mean, group = group)) + 
+                      scale_x_discrete(expand = c(0.2, 0)) +
+                      scale_color_discrete(name = "Group", 
+                                           labels = c("2x Landrace", "2x Wild", 
+                                                      "4x Landrace", "4x Wild")) + 
+                      labs(x = "", y = "") +
+                      theme_classic(12) + 
+                      theme(plot.title = element_text(hjust = 0.5),
+                            text=element_text(family="Times New Roman"))})
+```
+
+```{r cohens d perms, eval=FALSE}
+onePermCD = function(tib){
+  cohens_d = tib %>% 
+    group_by(treatment) %>%
+    mutate(group = sample(group, replace = F)) %>%
+    group_by(treatment, group) %>% 
+    summarise(mean = mean(value), sd = sd(value), n = n(), sd_n = (sd^2)*(n-1)) %>% 
+    select(-sd) %>% 
+    group_by(group) %>%
+    mutate(n = sum(n)) %>%
+    pivot_wider(names_from = treatment, values_from = c(sd_n, mean)) %>%
+    mutate(pooled_sd = sqrt((sd_n_0 + sd_n_1)/(n-2)), diff_mean = (mean_1 - mean_0), cohens_d = diff_mean/pooled_sd) %>%
+    pull(cohens_d)
+  
+  c(dist(cohens_d))
+}
+
+phenoNoOuts <- lapply(pheno.list, function(x){
+  x %>%
+    group_by(group, treatment) %>% 
+    mutate(q1 = quantile(value, probs = 0.25),
+           q2 = quantile(value, probs = 0.75),
+           iqr = IQR(value),
+           up = q2+(2.5*iqr),
+           down = q1-(2.5*iqr)) %>%
+    filter(value > down, value < up) %>% 
+    select(group, treatment, trait, year, value)}) %>% 
+  rbindlist()
+
+cohenNoOuts <- phenoNoOuts %>% 
+  group_by(treatment, trait, year, group) %>% 
+  summarise(mean = mean(value), 
+            sd = sd(value), 
+            n = n(), 
+            sd_n = (sd^2)*(n-1)) %>% 
+  select(-sd) %>% 
+  group_by(group, trait, year) %>% 
+  mutate(n = sum(n)) %>% 
+  pivot_wider(names_from = treatment, 
+              values_from = c(sd_n, mean)) %>% 
+  mutate(pooled_sd = sqrt((sd_n_0 + sd_n_1)/(n-2)), 
+         diff_mean = (mean_1 - mean_0), 
+         cohens_d = diff_mean/pooled_sd) %>% 
+  group_by(trait, year) %>%
+  group_split()
+
+phenoNoOut.list = phenoNoOuts %>% group_by(trait, year) %>% group_split()
+
+permsNoOutsCD <- lapply(phenoNoOut.list, function(x) {
+  unlist(replicate(n = 1000, 
+                        expr = onePermCD(tib = x),
+                        simplify = F))}
+)
+
+pvalsNoOutsCD = list()
+for(i in 1:7){
+  pvalsNoOutsCD[[i]] = colMeans(matrix(c(dist(cohenNoOuts[[i]]$cohens_d)) < sort(permsNoOutsCD[[i]]), 
+                                 ncol = 6, byrow = T))
+  names(pvalsNoOutsCD[[i]]) <- c("2xLR-2xW", "2xLR-4xLR", "2xLR-4xW", "2xW-4xLR", "2xW-4xW", "4xLR-4xW")
+}
+
+traits = c("FT", "AGB", "PH", "FT", "AGB", "PH", "PS")
+
+matrix(unlist(pvalsNoOutsCD), nrow = 7, byrow = T, dimnames = list(traits, names(pvalsNoOutsCD[[1]])))
 
 ```
 
 ```{r}
+
+cohens_d <- lapply(pheno.list, function(x) {
+  x %>% 
+  group_by(treatment, trait, year, group) %>% 
+  summarise(median = median(value), 
+            sd = sd(value), 
+            n = n(), 
+            sd_n = (sd^2)*(n-1)) %>% 
+  select(-sd) %>% 
+  group_by(group, trait, year) %>% 
+  mutate(n = sum(n)) %>% 
+  pivot_wider(names_from = treatment, 
+              values_from = c(sd_n, median)) %>% 
+  mutate(pooled_sd = sqrt((sd_n_0 + sd_n_1)/(n-2)), 
+         diff_median = (median_1 - median_0), 
+         cohens_d = diff_median/pooled_sd)})
+
+permsCD <- lapply(pheno.list, function(x) {
+  sort(unlist(replicate(n = 1000, 
+                        expr = onePermCD(tib = x),
+                        simplify = F)))}
+)
+
+pvalsCD = list()
+for(i in 1:7){
+  pvalsCD[[i]] = colMeans(matrix(rep(c(dist(cohens_d[[i]]$cohens_d)), times = 1000) < sort(rep(permsCD[[i]])), 
+                                 ncol = 6, byrow = T))
+  names(pvalsCD[[i]]) <- c("2xLR-2xW", "2xLR-4xLR", "2xLR-4xW", "2xW-4xLR", "2xW-4xW", "4xLR-4xW")
+}
+
+matrix(unlist(pvalsCD), nrow = 7, dimnames = list(traits, names(pvalsCD[[1]])))
+
+```
+
+```{r cohens d, eval=FALSE}
+
+onePermCD = function(tib){
+  cohens_d = tib %>% 
+    group_by(treatment) %>%
+    mutate(group = sample(group, replace = F)) %>%
+    group_by(treatment, group) %>% 
+    summarise(mean = mean(value), sd = sd(value), n = n(), sd_n = (sd^2)*(n-1)) %>% 
+    select(-sd) %>% 
+    group_by(group) %>%
+    mutate(n = sum(n)) %>%
+    pivot_wider(names_from = treatment, values_from = c(sd_n, mean)) %>%
+    mutate(pooled_sd = sqrt((sd_n_0 + sd_n_1)/(n-2)), diff_mean = (mean_1 - mean_0), cohens_d = diff_mean/pooled_sd) %>%
+    pull(cohens_d)
+  
+  c(dist(cohens_d))
+}
+
+# phenoNoOuts <- lapply(pheno.list, function(x){
+#   x %>%
+#     group_by(group, treatment) %>% 
+#     mutate(q1 = quantile(value, probs = 0.25),
+#            q2 = quantile(value, probs = 0.75),
+#            iqr = IQR(value),
+#            up = q2+(2*iqr),
+#            down = q1-(2*iqr)) %>%
+#     filter(value > down, value < up) %>% 
+#     select(group, treatment, trait, year, value)}) %>% 
+#   rbindlist()
+# 
+# cohenNoOuts <- phenoNoOuts %>% 
+#   group_by(treatment, trait, year, group) %>% 
+#   summarise(mean = mean(value), 
+#             sd = sd(value), 
+#             n = n(), 
+#             sd_n = (sd^2)*(n-1)) %>% 
+#   select(-sd) %>% 
+#   group_by(group, trait, year) %>% 
+#   mutate(n = sum(n)) %>% 
+#   pivot_wider(names_from = treatment, 
+#               values_from = c(sd_n, mean)) %>% 
+#   mutate(pooled_sd = sqrt((sd_n_0 + sd_n_1)/(n-2)), 
+#          diff_mean = (mean_1 - mean_0), 
+#          cohens_d = diff_mean/pooled_sd) %>% 
+#   group_by(trait, year) %>%
+#   group_split()
+# 
+# phenoNoOut.list = phenoNoOuts %>% group_by(trait, year) %>% group_split()
+# 
+# permsNoOutsCD <- lapply(phenoNoOut.list, function(x) {
+#   unlist(replicate(n = 1000, 
+#                         expr = onePermCD(tib = x),
+#                         simplify = F))}
+# )
+# 
+# pvalsNoOutsCD = list()
+# for(i in 1:7){
+#   pvalsNoOutsCD[[i]] = colMeans(matrix(c(dist(cohenNoOuts[[i]]$cohens_d)) < sort(permsNoOutsCD[[i]]), 
+#                                  ncol = 6, byrow = T))
+#   names(pvalsNoOutsCD[[i]]) <- c("2xLR-2xW", "2xLR-4xLR", "2xLR-4xW", "2xW-4xLR", "2xW-4xW", "4xLR-4xW")
+# }
+
+cohens_d <- lapply(pheno.list, function(x) {
+  x %>% 
+  group_by(treatment, trait, year, group) %>% 
+  summarise(mean = mean(value), 
+            sd = sd(value), 
+            n = n(), 
+            sd_n = (sd^2)*(n-1)) %>% 
+  select(-sd) %>% 
+  group_by(group, trait, year) %>% 
+  mutate(n = sum(n)) %>% 
+  pivot_wider(names_from = treatment, 
+              values_from = c(sd_n, mean)) %>% 
+  mutate(pooled_sd = sqrt((sd_n_0 + sd_n_1)/(n-2)), 
+         diff_mean = (mean_1 - mean_0), 
+         cohens_d = diff_mean/pooled_sd)})
+
+permsCD <- lapply(pheno.list, function(x) {
+  sort(unlist(replicate(n = 1000, 
+                        expr = onePermCD(tib = x),
+                        simplify = F)))}
+)
+
+pvalsCD = list()
+for(i in 1:7){
+  pvalsCD[[i]] = colMeans(matrix(rep(c(dist(cohens_d[[i]]$cohens_d)), times = 1000) < sort(rep(permsCD[[i]])), 
+                                 ncol = 6, byrow = T))
+  names(pvalsCD[[i]]) <- c("2xLR-2xW", "2xLR-4xLR", "2xLR-4xW", "2xW-4xLR", "2xW-4xW", "4xLR-4xW")
+}
+
+```
+
+```{r calculate delta z, eval=FALSE}
 phenoPercent <- lapply(pheno.list, function(x) x %>%
          pivot_wider(names_from = treatment, values_from = value) %>%
          group_by(group, trait, year) %>%
@@ -283,9 +1263,10 @@ phenoPercent <- lapply(pheno.list, function(x) x %>%
 
 ```
 
-```{r}
-group_long <- c("2x_W" = "2x Wild", "2x_LR" = "2x Landrace", 
-                "4x_W" = "4x Wild", "4x_LR" = "4x Landrace")
+```{r delta z plots, eval=FALSE}
+# 
+# group_long <- c("2x_LR" = "2x Landrace", "2x_W" = "2x Wild", 
+#                 "4x_LR" = "4x Landrace", "4x_W" = "4x Wild")
 
 plot.list.percent <- lapply(phenoPercent, function(x){ 
                     x$group <- group_long[x$group]
@@ -408,6 +1389,43 @@ percent.plots <- ggpubr::ggarrange(plotlist = plot.list.ordered,
                                heights = c(0.12, .3, .3, .3, .3), vjust = 0,
                                widths = c(1.3, 2.6, 2.6))
 
-ggsave("percentPlots.png", plot = percent.plots, width = 6.5, height = 7.5)
+# ggsave("percentPlots.png", plot = percent.plots, width = 6.5, height = 7.5)
 ```
 
+dij→i'j' = xi′j′ − xij
+RDPI = ∑(dij→i′j′/(xi′j′ + xij) )/n
+
+```{r}
+foo <- lapply(pheno.list, function(x){
+  x %>%
+  ungroup() %>% 
+  pivot_wider(names_from = treatment, values_from = value, names_prefix = "env") %>%
+  select(group, env1, env0)})
+
+distances = lapply(foo, function(t) {
+  tapply(t, t$group, function(x){
+  d = NULL
+  for(i in 1:nrow(x)){
+    for(j in 1:nrow(x)){
+      d = c(d, abs(x$env0[i] - x$env1[j])/(x$env0[i] + x$env1[j]))
+    }
+  }
+  d = d[which(!is.na(d))]
+  return(d)
+  }
+)})
+groups = c("2xLR", "2xW", "4xLR", "4xW")
+
+distance.tib <- lapply(distances, function(x){
+  tib = tibble(group = NULL, distance = NULL)
+  for(i in 1:4){
+  tib = rbind(tib, tibble(group = groups[i], distance = x[[i]]))}
+  return(tib)
+})
+
+lapply(distance.tib, function(x){
+  letters = multcompView::multcompLetters(TukeyHSD(aov(distance ~ group, data = x))$group[,4])$Letters
+  letters[order(factor(names(letters), levels=groups))]
+})
+
+```
